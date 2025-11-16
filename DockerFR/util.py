@@ -1,86 +1,107 @@
-import cv2
-import numpy as np
-from numpy.linalg import norm
+"""
+Utility stubs for the face recognition project.
+
+Each function is intentionally left unimplemented so that students can
+fill in the logic as part of the coursework.
+"""
+
 from typing import Any, List
+import numpy as np
+import cv2
 from insightface.app import FaceAnalysis
 
-app = FaceAnalysis(name="buffalo_l")
-app.prepare(ctx_id=0, det_size=(640, 640))
-
-RETINA = np.array([
-    [38.2946, 51.6963],
-    [73.5318, 51.5014],
-    [56.0252, 71.7366],
-    [41.5493, 92.3655],
-    [70.7299, 92.2041],
-], dtype=np.float32)
-
-
-def _bytes_to_bgr(b: bytes) -> np.ndarray:
-    arr = np.frombuffer(b, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("decode fail")
-    return img
+# lazy model setup
+_FACE_ENGINE = None
+def _engine():
+    global _FACE_ENGINE
+    if _FACE_ENGINE is None:
+        model = FaceAnalysis(providers=["CPUExecutionProvider"])
+        model.prepare(ctx_id=0, det_size=(640, 640))
+        _FACE_ENGINE = model
+    return _FACE_ENGINE
 
 
-def _largest(faces):
-    if not faces:
-        return None
-    return max(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
-
-
-def _cos(a, b):
-    return float(np.dot(a, b) / (norm(a) * norm(b) + 1e-8))
+def _decode(x: Any) -> np.ndarray:
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, (bytes, bytearray)):
+        arr = np.frombuffer(x, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Failed to decode image bytes")
+        return img
+    raise TypeError("Unsupported image format")
 
 
 def detect_faces(image: Any) -> List[Any]:
-    return app.get(_bytes_to_bgr(image))
+    frame = _decode(image)
+    faces = _engine().get(frame)
 
+    result = []
+    for f in faces:
+        (x1, y1, x2, y2) = f.bbox.astype(int)
+        face_crop = frame[y1:y2, x1:x2]
+        result.append({
+            "bbox": (x1, y1, x2 - x1, y2 - y1),
+            "crop": face_crop,
+            "keypoints": f.kps,
+            "embedding": f.normed_embedding,
+            "confidence": float(f.det_score),
+        })
 
-def detect_face_keypoints(face_image: Any) -> Any:
-    return face_image.kps
-
-
-def warp_face(image: Any, kps: Any, size=(112, 112)) -> Any:
-    dst = RETINA.copy()
-    dst[:, 0] *= size[0] / 112.0
-    dst[:, 1] *= size[1] / 112.0
-    M, _ = cv2.estimateAffinePartial2D(kps, dst, method=cv2.LMEDS)
-    return cv2.warpAffine(image, M, size, borderValue=0)
+    result.sort(key=lambda x: x["confidence"], reverse=True)
+    return result
 
 
 def compute_face_embedding(face_image: Any) -> Any:
-    r = app.get(face_image)
-    if not r:
-        raise ValueError("no face")
-    return r[0].embedding.astype(np.float32)
+    faces = detect_faces(face_image)
+    if not faces:
+        raise ValueError("No face found")
+    return faces[0]["embedding"]
+
+
+def detect_face_keypoints(face_image: Any) -> Any:
+    faces = detect_faces(face_image)
+    if not faces:
+        raise ValueError("No face found")
+    return faces[0]["keypoints"]
+
+
+def warp_face(image: Any, homography_matrix: Any) -> Any:
+    img = _decode(image)
+    M = np.asarray(homography_matrix, dtype=np.float32)
+
+    if M.shape == (2, 3):
+        return cv2.warpAffine(img, M, (112, 112))
+    elif M.shape == (3, 3):
+        return cv2.warpPerspective(img, M, (112, 112))
+    else:
+        raise ValueError("Invalid homography matrix size")
 
 
 def antispoof_check(face_image: Any) -> float:
-    g = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-    lap = cv2.Laplacian(g, cv2.CV_64F)
-    s = lap.var()
-    return float(s / (s + 1000.0))
+    img = _decode(face_image)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    sharp = cv2.Laplacian(gray, cv2.CV_32F).var()
+    score = (sharp / 280.0) ** 0.65
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.clip(np.dot(a, b), -1.0, 1.0))
 
 
 def calculate_face_similarity(image_a: Any, image_b: Any) -> float:
-    a = _bytes_to_bgr(image_a)
-    b = _bytes_to_bgr(image_b)
+    fa = detect_faces(image_a)
+    fb = detect_faces(image_b)
 
-    fa = _largest(app.get(a))
-    fb = _largest(app.get(b))
+    if not fa or not fb:
+        raise ValueError("Face missing")
 
-    if fa is None or fb is None:
-        raise ValueError("no face")
+    emb_a = fa[0]["embedding"]
+    emb_b = fb[0]["embedding"]
 
-    al_a = warp_face(a, fa.kps)
-    al_b = warp_face(b, fb.kps)
+    spoof_a = antispoof_check(fa[0]["crop"])
+    spoof_b = antispoof_check(fb[0]["crop"])
 
-    if antispoof_check(al_a) < 0.3 or antispoof_check(al_b) < 0.3:
-        return 0.0
-
-    ea = compute_face_embedding(al_a)
-    eb = compute_face_embedding(al_b)
-
-    return _cos(ea, eb)
+    return _cos(emb_a, emb_b)
