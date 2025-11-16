@@ -1,71 +1,86 @@
-"""
-Utility stubs for the face recognition project.
-
-Each function is intentionally left unimplemented so that students can
-fill in the logic as part of the coursework.
-"""
-
+import cv2
+import numpy as np
+from numpy.linalg import norm
 from typing import Any, List
+from insightface.app import FaceAnalysis
+
+app = FaceAnalysis(name="buffalo_l")
+app.prepare(ctx_id=0, det_size=(640, 640))
+
+RETINA = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
+
+
+def _bytes_to_bgr(b: bytes) -> np.ndarray:
+    arr = np.frombuffer(b, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("decode fail")
+    return img
+
+
+def _largest(faces):
+    if not faces:
+        return None
+    return max(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]))
+
+
+def _cos(a, b):
+    return float(np.dot(a, b) / (norm(a) * norm(b) + 1e-8))
 
 
 def detect_faces(image: Any) -> List[Any]:
-    """
-    Detect faces within the provided image.
-
-    Parameters can be raw image bytes or a decoded image object, depending on
-    the student implementation. Expected to return a list of face regions
-    (e.g., bounding boxes or cropped images).
-    """
-    raise NotImplementedError("Student implementation required for face detection")
-
-
-def compute_face_embedding(face_image: Any) -> Any:
-    """
-    Compute a numerical embedding vector for the provided face image.
-
-    The embedding should capture discriminative facial features for comparison.
-    """
-    raise NotImplementedError("Student implementation required for face embedding")
+    return app.get(_bytes_to_bgr(image))
 
 
 def detect_face_keypoints(face_image: Any) -> Any:
-    """
-    Identify facial keypoints (landmarks) for alignment or analysis.
-
-    The return type can be tailored to the chosen keypoint detection library.
-    """
-    raise NotImplementedError("Student implementation required for keypoint detection")
+    return face_image.kps
 
 
-def warp_face(image: Any, homography_matrix: Any) -> Any:
-    """
-    Warp the provided face image using the supplied homography matrix.
+def warp_face(image: Any, kps: Any, size=(112, 112)) -> Any:
+    dst = RETINA.copy()
+    dst[:, 0] *= size[0] / 112.0
+    dst[:, 1] *= size[1] / 112.0
+    M, _ = cv2.estimateAffinePartial2D(kps, dst, method=cv2.LMEDS)
+    return cv2.warpAffine(image, M, size, borderValue=0)
 
-    Typically used to align faces prior to embedding extraction.
-    """
-    raise NotImplementedError("Student implementation required for homography warping")
+
+def compute_face_embedding(face_image: Any) -> Any:
+    r = app.get(face_image)
+    if not r:
+        raise ValueError("no face")
+    return r[0].embedding.astype(np.float32)
 
 
 def antispoof_check(face_image: Any) -> float:
-    """
-    Perform an anti-spoofing check and return a confidence score.
-
-    A higher score should indicate a higher likelihood that the face is real.
-    """
-    raise NotImplementedError("Student implementation required for face anti-spoofing")
+    g = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(g, cv2.CV_64F)
+    s = lap.var()
+    return float(s / (s + 1000.0))
 
 
 def calculate_face_similarity(image_a: Any, image_b: Any) -> float:
-    """
-    End-to-end pipeline that returns a similarity score between two faces.
+    a = _bytes_to_bgr(image_a)
+    b = _bytes_to_bgr(image_b)
 
-    This function should:
-      1. Detect faces in both images.
-      2. Align faces using keypoints and homography warping.
-      3. (Run anti-spoofing checks to validate face authenticity. - If you want)
-      4. Generate embeddings and compute a similarity score.
+    fa = _largest(app.get(a))
+    fb = _largest(app.get(b))
 
-    The images provided by the API arrive as raw byte strings; convert or decode
-    them as needed for downstream processing.
-    """
-    raise NotImplementedError("Student implementation required for face similarity calculation")
+    if fa is None or fb is None:
+        raise ValueError("no face")
+
+    al_a = warp_face(a, fa.kps)
+    al_b = warp_face(b, fb.kps)
+
+    if antispoof_check(al_a) < 0.3 or antispoof_check(al_b) < 0.3:
+        return 0.0
+
+    ea = compute_face_embedding(al_a)
+    eb = compute_face_embedding(al_b)
+
+    return _cos(ea, eb)
