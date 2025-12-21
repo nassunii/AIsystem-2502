@@ -1,19 +1,19 @@
 name: "fr_model"
 platform: "onnxruntime_onnx"
-max_batch_size: 0
+max_batch_size: 8
 default_model_filename: "model.onnx"
 input [
   {
     name: "input.1"
     data_type: TYPE_FP32
-    dims: [-1, 3, 112, 112]
+    dims: [3, 112, 112]
   }
 ]
 output [
   {
     name: "516"
     data_type: TYPE_FP32
-    dims: [1, 512]
+    dims: [512]
   }
 ]
 instance_group [
