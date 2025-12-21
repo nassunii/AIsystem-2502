@@ -1,4 +1,6 @@
 # 🚀 Quick Start (For TAs)
+Yeseon Hong
+----
 
 ## 0. Open `DockerFRTriton`
 
