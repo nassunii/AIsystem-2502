@@ -1,56 +1,72 @@
-from typing import Any, Tuple
+# DockerFRTriton
 
-import numpy as np
+Serve a face-recognition (FR) system on Triton Inference Server (CPU) with a FastAPI wrapper. Students must export models to ONNX, build a Triton-ready model repository, and keep all inference on Triton (FR backbone, detector, and any future alignment/spoofing).
 
-from triton_service import run_inference
+## What you must implement
+- Export your FR backbone to ONNX for CPU in `convert_to_onnx.py` (replace the toy model, load your weights, keep dynamic batch).
+- Export your face detector to ONNX (example script in `DockerOnnxDetector/export_retinaface_to_onnx.py`).
+- Ensure the Triton model repository is correct and configs match your input/output shapes and names.
+- Extend `triton_service.py` preprocessing or shapes if your model differs.
+- Extend `pipeline.py` to call detector/alignment/antispoof models (all should live in the Triton repo).
+- Keep FastAPI (`app.py`) thin; it should just call Triton endpoints via the client.
 
+## Model repository layout
+```
+DockerFRTriton/
+└── model_repository/
+    ├── fr_model/
+    │   ├── 1/
+    │   │   └── model.onnx
+    │   └── config.pbtxt
+    └── face_detector/
+        ├── 1/
+        │   └── model.onnx
+        └── config.pbtxt
+```
+Use the same root path for export, config generation, and Triton startup.
 
-def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
-    """
-    Compute cosine similarity between two 1D vectors.
-    If embeddings are already normalized (like InsightFace normed_embedding),
-    we can use dot product directly. Otherwise, normalize first.
-    """
-    # Normalize embeddings (InsightFace ArcFace outputs are typically normalized)
-    vec_a = vec_a.flatten()
-    vec_b = vec_b.flatten()
-    
-    a_norm = np.linalg.norm(vec_a)
-    b_norm = np.linalg.norm(vec_b)
-    
-    if a_norm == 0.0 or b_norm == 0.0:
-        return 0.0
-    
-    # Normalize if not already normalized (check if norm is close to 1.0)
-    if abs(a_norm - 1.0) > 0.01:
-        vec_a = vec_a / a_norm
-    if abs(b_norm - 1.0) > 0.01:
-        vec_b = vec_b / b_norm
-    
-    # Cosine similarity of normalized vectors is just dot product
-    similarity = float(np.dot(vec_a, vec_b))
-    # Clamp to [-1, 1] range
-    return max(-1.0, min(1.0, similarity))
+## Export models locally
+```bash
+# Export your FR model to ONNX
+python convert_to_onnx.py \
+  --weights-path weights/your_fr_model.pth \
+  --onnx-path model_repository/fr_model/1/model.onnx
 
+# (Optional) Export detector to ONNX via DockerOnnxDetector
+python ../DockerOnnxDetector/export_retinaface_to_onnx.py \
+  --weights-path ../DockerOnnxDetector/weights/mobilenet0.25_Final.pth \
+  --onnx-path model_repository/face_detector/1/model.onnx
+```
 
-def get_embeddings(client: Any, image_a: bytes, image_b: bytes) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Call Triton twice to obtain embeddings for two images.
+## Run with Docker + FastAPI (all-in-one container)
+- Build image (uses `model_repository/*`):
+  ```bash
+  docker build -t fr-triton -f Docker/Dockerfile .
+  ```
+- Run container (Triton on 8000/8001/8002, FastAPI on 3000):
+  ```bash
+  docker run --rm \
+    -p 8000:8000 -p 8001:8001 -p 8002:8002 \
+    -p 3000:3000 \
+    --name fr_triton \
+    fr-triton
+  ```
+- Open Swagger UI at:
+  ```
+  http://0.0.0.0:3000
+  ```
+  (FastAPI inside the container proxies to Triton on localhost:8000.)
 
-    Extend this by adding detection/alignment/antispoof when those Triton models
-    are available in the repository. For now we assume inputs are already aligned.
-    """
-    emb_a = run_inference(client, image_a)
-    emb_b = run_inference(client, image_b)
-    return emb_a.squeeze(0), emb_b.squeeze(0)
+If `model_repository/fr_model/1/model.onnx` is missing, the container still starts and serves Swagger, but Triton-dependent endpoints will return 503 until you add the models. For local (non-Docker) development, you can run `python run_fastapi.py` to create a venv, install deps, and start Uvicorn.
 
+## Key files
+- `convert_to_onnx.py`: Replace `ToyFRModel`, load your weights, export ONNX (dynamic batch). Adjust input size/names if needed.
+- `triton_service.py`: Prepares `config.pbtxt`, starts/stops Triton, creates HTTP client, preprocesses inputs, and calls `infer`. Update shapes/names to match your models.
+- `pipeline.py`: Currently calls the FR model twice and returns cosine similarity. Extend to call detector/alignment/antispoof models once they are in `model_repository`.
+- `app.py`: FastAPI wrapper exposing `/embedding`, `/face-similarity`, `/health`. Keep business logic inside Triton via `pipeline.py`.
 
-def calculate_face_similarity(client: Any, image_a: bytes, image_b: bytes) -> float:
-    """
-    Minimal end-to-end similarity using Triton-managed FR model.
-
-    Students should swap in detection, alignment, and spoofing once those models
-    are added to the Triton repository. This keeps all model execution on Triton.
-    """
-    emb_a, emb_b = get_embeddings(client, image_a, image_b)
-    return _cosine_similarity(emb_a, emb_b)
+## Notes
+- Always align the config (`config.pbtxt`) with the ONNX model’s input/output names, shapes, and types.
+- All models (FR, detector, etc.) should be served by Triton; FastAPI should not run heavy model code locally.
+- If you change the model repository root, pass the same Path to `prepare_model_repository` and `start_triton_server`.
+- **Submission reminder:** include your repository URL/ID and a port-forwarded Swagger URL for the running API when you submit.
